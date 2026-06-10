@@ -7,6 +7,7 @@ namespace Unified\IntercomWidget\View\Components;
 use Firebase\JWT\JWT;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Contracts\View\View;
+use Illuminate\Support\Facades\Log;
 use Illuminate\View\Component;
 use Unified\IntercomWidget\Contracts\IntercomPayloadResolver;
 
@@ -35,6 +36,8 @@ class Widget extends Component
         $token = is_string($secret) && $secret !== ''
             ? $this->signJwt($payload->toJwtClaims(), $secret)
             : null;
+        // A non-empty but unusable secret (e.g. shorter than the 32-byte HMAC
+        // floor php-jwt v7 enforces) signs to null below, not a hard failure.
 
         $apiBase = (string) $this->config->get('intercom.api_base', 'https://api-iam.intercom.io');
 
@@ -58,9 +61,14 @@ class Widget extends Component
     }
 
     /**
+     * Sign the Intercom identity JWT, or return null (→ unauthenticated boot)
+     * if the configured secret can't produce a valid token. php-jwt v7 rejects
+     * HMAC keys shorter than the algorithm's block size, so a misconfigured
+     * secret must degrade gracefully rather than 500 every page render.
+     *
      * @param  array<string, mixed>  $claims
      */
-    private function signJwt(array $claims, string $secret): string
+    private function signJwt(array $claims, string $secret): ?string
     {
         $now = time();
         $ttl = (int) $this->config->get('intercom.jwt_ttl_seconds', 3600);
@@ -68,6 +76,14 @@ class Widget extends Component
         $claims['iat'] = $now;
         $claims['exp'] = $now + $ttl;
 
-        return JWT::encode($claims, $secret, 'HS256');
+        try {
+            return JWT::encode($claims, $secret, 'HS256');
+        } catch (\Throwable $e) {
+            Log::warning('intercom-widget: could not sign identity JWT, falling back to unauthenticated boot.', [
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 }
